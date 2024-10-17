@@ -1,119 +1,323 @@
+import cv2
+import numpy as np
 import os
-from tkinter import *
-from tkinter import ttk
-from PIL import Image, ImageTk
+import sqlite3
+import json
+from PIL import Image
+import tensorflow as tf
+from tensorflow.keras.applications import MobileNetV2
+from tensorflow.keras.preprocessing import image as keras_image
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+from sklearn.svm import SVC
+import time
 
-from student import Student
-from train import Train
-from face_recognition import Face_Recognition
+class FaceTrainer:
+    def __init__(self):
+        self.face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+        self.eye_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_eye.xml')
+        self.sift = cv2.SIFT_create()
+        self.mobilenet_model = MobileNetV2(weights='imagenet', include_top=False, input_shape=(224, 224, 3), pooling='avg')
+        self.font = cv2.FONT_HERSHEY_SIMPLEX
+        self.db_path = "face_recognition.db"
+        self.initialize_database()
 
+    def initialize_database(self):
+        conn = None
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            cursor.execute('''CREATE TABLE IF NOT EXISTS users
+                              (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                               username TEXT UNIQUE NOT NULL)''')
+            
+            cursor.execute('''CREATE TABLE IF NOT EXISTS training_sessions
+                              (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                               user_id INTEGER,
+                               timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                               num_images INTEGER,
+                               model_accuracy REAL,
+                               training_stats TEXT,
+                               FOREIGN KEY (user_id) REFERENCES users(id))''')
+            
+            conn.commit()
+            print("Database initialized successfully")
+        except sqlite3.Error as e:
+            print(f"Database error: {e}")
+        finally:
+            if conn:
+                conn.close()
 
-class Face_Recognition_System:
-    def __init__(self, root):
-        self.root = root
-        self.root.geometry("1530x790+0+0")
-        self.root.title("Face Recognition System")
+    def preprocess_image(self, image):
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        faces = self.face_cascade.detectMultiScale(gray, scaleFactor=1.3, minNeighbors=5)
+        
+        if len(faces) == 0:
+            return None
+        
+        (x, y, w, h) = faces[0]
+        face = gray[y:y+h, x:x+w]
+        face = cv2.resize(face, (224, 224))
+        
+        # Histogram equalization for better contrast
+        face = cv2.equalizeHist(face)
+        
+        return (face, (x, y, w, h))
 
-        # first image
-        img1 = Image.open(r"images\2.jpeg")
-        img1= img1.resize((500,130), Image.LANCZOS)
-        self.photoimg1=ImageTk.PhotoImage(img1)
-        f_lbl = Label(self.root, image=self.photoimg1)
-        f_lbl.place(x=0, y=0, width=500, height=130)
+    def extract_features(self, face):
+        # SIFT features
+        keypoints, descriptors = self.sift.detectAndCompute(face, None)
+        if descriptors is not None:
+            sift_features = np.mean(descriptors, axis=0)
+        else:
+            sift_features = np.zeros(128)  # SIFT descriptor length
+        
+        # Deep learning features
+        face_rgb = cv2.cvtColor(face, cv2.COLOR_GRAY2RGB)
+        face_rgb = cv2.resize(face_rgb, (224, 224))
+        face_rgb = keras_image.img_to_array(face_rgb)
+        face_rgb = np.expand_dims(face_rgb, axis=0)
+        face_rgb = tf.keras.applications.mobilenet_v2.preprocess_input(face_rgb)
+        deep_features = self.mobilenet_model.predict(face_rgb).flatten()
+        
+        # Combine all features
+        combined_features = np.concatenate([sift_features, deep_features])
+        
+        return combined_features
 
-        # second image
-        img2 = Image.open(r"images\1.jpg")
-        img2= img2.resize((500,130), Image.LANCZOS)
-        self.photoimg2=ImageTk.PhotoImage(img2)
-        f_lbl = Label(self.root, image=self.photoimg2)
-        f_lbl.place(x=500, y=0, width=500, height=130)
+    def generate_dataset(self):
+        if not os.path.exists('data'):
+            os.makedirs('data')
 
-         # Third image
-        img3 = Image.open(r"images\3.jpg")
-        img3= img3.resize((560,130), Image.LANCZOS)
-        self.photoimg3=ImageTk.PhotoImage(img3)
-        f_lbl = Label(self.root, image=self.photoimg3)
-        f_lbl.place(x=1000, y=0, width=560, height=130)
+        username = input("Enter the person's name: ")
+        
+        # Add user to the database if not exists
+        user_id = self.add_user_to_db(username)
+        
+        cap = cv2.VideoCapture(0)
+        img_id = 0
+        total_imgs = 20
 
-         # bg image
-        img4 = Image.open(r"images\3.jpg")
-        img4= img4.resize((1530,710), Image.LANCZOS)
-        self.photoimg4=ImageTk.PhotoImage(img4)
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                print("Failed to capture frame from camera.")
+                break
 
-        bg_img = Label(self.root, image=self.photoimg4)
-        bg_img.place(x=0, y=130, width=1530, height=710)
+            result = self.preprocess_image(frame)
+            if result is not None:
+                face, (x, y, w, h) = result
+                cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
+                
+                img_id += 1
+                img_name = f"data/{username}.{user_id}.{img_id}.jpg"
+                cv2.imwrite(img_name, face)
+                cv2.putText(frame, f"Captured {img_id}/{total_imgs}", (50, 50), self.font, 0.9, (0, 255, 0), 2)
+                print(f"Captured image {img_id}/{total_imgs}: {img_name}")
+                
+                time.sleep(0.25)
+            else:
+                cv2.putText(frame, "No face detected", (50, 50), self.font, 0.9, (0, 0, 255), 2)
 
-        title_lbl = Label(bg_img, text = "FACE RECOGNITION ATTENDANCE SYSTEM", font=("Times New Roman", 35, "bold"), bg="White", fg="red")
-        title_lbl.place(x=0, y=0,width=1530, height=45)
+            cv2.imshow('Capturing Face Data', frame)
 
-        # Student button
-        img5 = Image.open(r"images\3.jpg")
-        img5= img5.resize((220,220), Image.LANCZOS)
-        self.photoimg5=ImageTk.PhotoImage(img5)
-        b1= Button(bg_img, image=self.photoimg5, command=self.student_details,cursor="hand2")
-        b1.place(x=200, y=100, width=220, height=220)
+            if cv2.waitKey(1) & 0xFF == ord('q') or img_id == total_imgs:
+                break
 
-        b1_1= Button(bg_img, text="Student Details", command=self.student_details ,cursor="hand2" , font=("Times New Roman", 15, "bold"), bg="darkblue", fg="white")
-        b1_1.place(x=200, y=300, width=220, height=40)
+        cap.release()
+        cv2.destroyAllWindows()
+        print(f"Dataset generation completed for {username}. {img_id} images captured.")
 
-         # Detect face button
-        img6 = Image.open(r"images\3.jpg")
-        img6= img6.resize((220,220), Image.LANCZOS)
-        self.photoimg6=ImageTk.PhotoImage(img6)
-        b1= Button(bg_img, image=self.photoimg6, command=self.face_data, cursor="hand2")
-        b1.place(x=500, y=100, width=220, height=220)
+        # Update training session in the database
+        self.update_training_session(user_id, img_id)
 
-        b1_1= Button(bg_img, text="Face Detector", command=self.face_data, cursor="hand2" , font=("Times New Roman", 15, "bold"), bg="darkblue", fg="white")
-        b1_1.place(x=500, y=300, width=220, height=40)
+    def add_user_to_db(self, username):
+        conn = None
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute("INSERT OR IGNORE INTO users (username) VALUES (?)", (username,))
+            conn.commit()
+            cursor.execute("SELECT id FROM users WHERE username = ?", (username,))
+            user_id = cursor.fetchone()[0]
+            return user_id
+        except sqlite3.Error as e:
+            print(f"Database error: {e}")
+        finally:
+            if conn:
+                conn.close()
 
-         # Attendance button
-        img7 = Image.open(r"images\3.jpg")
-        img7= img7.resize((220,220), Image.LANCZOS)
-        self.photoimg7=ImageTk.PhotoImage(img7)
-        b1= Button(bg_img, image=self.photoimg7,cursor="hand2")
-        b1.place(x=800, y=100, width=220, height=220)
+    def update_training_session(self, user_id, num_images, accuracy=None, training_stats=None):
+        conn = None
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO training_sessions 
+                (user_id, num_images, model_accuracy, training_stats) 
+                VALUES (?, ?, ?, ?)
+            """, (user_id, num_images, accuracy, training_stats))
+            conn.commit()
+        except sqlite3.Error as e:
+            print(f"Database error: {e}")
+        finally:
+            if conn:
+                conn.close()
 
-        b1_1= Button(bg_img, text="Attendance",cursor="hand2" , font=("Times New Roman", 15, "bold"), bg="darkblue", fg="white")
-        b1_1.place(x=800, y=300, width=220, height=40)
+    def train_classifier(self):
+        data_dir = "data"
+        path = [os.path.join(data_dir, f) for f in os.listdir(data_dir)]
 
-         # Train face button
-        img8 = Image.open(r"images\3.jpg")
-        img8= img8.resize((220,220), Image.LANCZOS)
-        self.photoimg8=ImageTk.PhotoImage(img8)
-        b1= Button(bg_img, image=self.photoimg8, command=self.train_data, cursor="hand2")
-        b1.place(x=200, y=380, width=220, height=220)
+        faces = []
+        ids = []
 
-        b1_1= Button(bg_img, text="Train Data", command=self.train_data, cursor="hand2" , font=("Times New Roman", 15, "bold"), bg="darkblue", fg="white")
-        b1_1.place(x=200, y=580, width=220, height=40)
+        print(f"Found {len(path)} images in the data directory.")
 
-        # Photos button
-        img9 = Image.open(r"images\3.jpg")
-        img9= img9.resize((220,220), Image.LANCZOS)
-        self.photoimg9=ImageTk.PhotoImage(img9)
-        b1= Button(bg_img, image=self.photoimg9, command=self.open_img, cursor="hand2")
-        b1.place(x=500, y=380, width=220, height=220)
+        for image_path in path:
+            img = cv2.imread(image_path)
+            result = self.preprocess_image(img)
+            if result is not None:
+                face, _ = result
+                features = self.extract_features(face)
+                id = int(os.path.split(image_path)[1].split('.')[1])
+                faces.append(features)
+                ids.append(id)
+            else:
+                print(f"Failed to preprocess image: {image_path}")
 
-        b1_1= Button(bg_img, text="Photos", command=self.open_img, cursor="hand2" , font=("Times New Roman", 15, "bold"), bg="darkblue", fg="white")
-        b1_1.place(x=500, y=580, width=220, height=40)
+        print(f"Successfully processed {len(faces)} images.")
 
-            #==============================Function buttons
+        if len(faces) == 0:
+            print("No faces detected in the dataset. Please check your images and try again.")
+            return
 
-    def student_details(self):
-        self.new_window = Toplevel(self.root)
-        self.app= Student(self.new_window)
-    
-    def train_data(self):
-        self.new_window = Toplevel(self.root)
-        self.app= Train(self.new_window)
+        faces = np.array(faces)
+        ids = np.array(ids)
 
-    def face_data(self):
-        self.new_window = Toplevel(self.root)
-        self.app= Face_Recognition(self.new_window)
+        unique_ids = np.unique(ids)
+        if len(unique_ids) < 2:
+            print("Error: At least two different persons are required for training.")
+            print(f"Current unique IDs: {unique_ids}")
+            return
 
-    def open_img(self):
-        os.startfile('data')
+        X_train, X_test, y_train, y_test = train_test_split(faces, ids, test_size=0.2, random_state=42)
 
+        # Train SVM classifier
+        self.svm_classifier = SVC(probability=True)
+        self.svm_classifier.fit(X_train, y_train)
+
+        # Evaluate the model
+        y_pred = self.svm_classifier.predict(X_test)
+        accuracy = accuracy_score(y_test, y_pred)
+        precision = precision_score(y_test, y_pred, average='weighted')
+        recall = recall_score(y_test, y_pred, average='weighted')
+        f1 = f1_score(y_test, y_pred, average='weighted')
+
+        training_stats = {
+            "unique_ids": len(set(ids)),
+            "total_images": len(faces),
+            "images_per_person": len(faces) / len(set(ids)),
+            "accuracy": accuracy,
+            "precision": precision,
+            "recall": recall,
+            "f1_score": f1
+        }
+
+        # Save to database
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO training_sessions 
+                (username, num_images, model_accuracy, training_stats) 
+                VALUES (?, ?, ?, ?)
+            """, ("latest_training", len(faces), accuracy, json.dumps(training_stats)))
+            conn.commit()
+        except sqlite3.Error as e:
+            print(f"Database error: {e}")
+        finally:
+            if conn:
+                conn.close()
+
+        print(f"Training completed. Accuracy: {accuracy:.2f}")
+        print(f"Training stats: {training_stats}")
+
+    def recognize_face(self):
+        cap = cv2.VideoCapture(0)
+        recognition_stats = {
+            "total_frames": 0,
+            "faces_detected": 0,
+            "faces_recognized": 0,
+            "confidence_scores": []
+        }
+        
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                print("Failed to capture frame from camera.")
+                break
+
+            result = self.preprocess_image(frame)
+            if result is not None:
+                face, (x, y, w, h) = result
+                features = self.extract_features(face)
+                
+                # Predict using SVM classifier
+                prediction = self.svm_classifier.predict([features])
+                confidence = self.svm_classifier.predict_proba([features]).max() * 100
+
+                recognition_stats["faces_detected"] += 1
+                recognition_stats["confidence_scores"].append(confidence)
+
+                if confidence > 50:
+                    recognition_stats["faces_recognized"] += 1
+                    label = prediction[0]
+                    cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
+                    cv2.putText(frame, f"ID: {label} ({confidence:.2f}%)", (x, y-10), self.font, 0.9, (0, 255, 0), 2)
+                else:
+                    cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 0, 255), 2)
+                    cv2.putText(frame, "Unknown", (x, y-10), self.font, 0.9, (0, 0, 255), 2)
+            else:
+                cv2.putText(frame, "No face detected", (50, 50), self.font, 0.9, (0, 0, 255), 2)
+
+            cv2.imshow('Face Recognition', frame)
+            recognition_stats["total_frames"] += 1
+
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
+
+        cap.release()
+        cv2.destroyAllWindows()
+
+        recognition_rate = recognition_stats["faces_recognized"] / recognition_stats["faces_detected"] if recognition_stats["faces_detected"] > 0 else 0
+        avg_confidence = np.mean(recognition_stats["confidence_scores"]) if recognition_stats["confidence_scores"] else 0
+        
+        print(f"Recognition stats: {recognition_stats}")
+        print(f"Recognition rate: {recognition_rate:.2f}")
+        print(f"Average confidence: {avg_confidence:.2f}")
+
+        # Save recognition stats to database
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO recognition_sessions 
+                (total_frames, faces_detected, faces_recognized, recognition_rate, avg_confidence) 
+                VALUES (?, ?, ?, ?, ?)
+            """, (recognition_stats["total_frames"], recognition_stats["faces_detected"], 
+                  recognition_stats["faces_recognized"], recognition_rate, avg_confidence))
+            conn.commit()
+        except sqlite3.Error as e:
+            print(f"Database error: {e}")
+        finally:
+            if conn:
+                conn.close()
+
+def main():
+    trainer = FaceTrainer()
+  
 if __name__ == "__main__":
-    root = Tk()
-    obj = Face_Recognition_System(root)
-    root.mainloop()
+    main()
+
+

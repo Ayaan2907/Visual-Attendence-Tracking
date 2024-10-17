@@ -11,6 +11,9 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 from sklearn.svm import SVC
 import time
+import warnings
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+os.environ['OPENCV_VIDEOIO_MSMF_ENABLE_HW_TRANSFORMS'] = '0'
 
 class FaceTrainer:
     def __init__(self):
@@ -316,7 +319,30 @@ class FaceTrainer:
 
 def main():
     trainer = FaceTrainer()
-  
+    while True:
+        print("\nFace Recognition Menu:")
+        print("1. Generate Dataset")
+        print("2. Train Classifier")
+        print("3. Recognize Face")
+        print("4. Exit")
+        
+        choice = input("Enter your choice (1-4): ")
+        
+        if choice == '1':
+            num_people = int(input("How many people do you want to add to the dataset? "))
+            for i in range(num_people):
+                trainer.generate_dataset()
+            print("Dataset generation completed. Please train the classifier now.")
+        elif choice == '2':
+            trainer.train_classifier()
+        elif choice == '3':
+            trainer.recognize_face()
+        elif choice == '4':
+            print("Exiting the program.")
+            break
+        else:
+            print("Invalid choice. Please try again.")
+
 if __name__ == "__main__":
     main()
 

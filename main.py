@@ -1,19 +1,26 @@
+
+import os
+os.environ['OPENCV_VIDEOIO_MSMF_ENABLE_HW_TRANSFORMS'] = '0'
+
 import cv2
 import numpy as np
-import os
 import sqlite3
 import json
-from PIL import Image
 import tensorflow as tf
 from tensorflow.keras.applications import MobileNetV2
 from tensorflow.keras.preprocessing import image as keras_image
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix, roc_curve, auc
 from sklearn.svm import SVC
-import time
 import warnings
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.metrics import confusion_matrix, roc_curve, auc
+from datetime import datetime
+import time
+from sklearn.model_selection import cross_val_score
+
 warnings.filterwarnings("ignore", category=DeprecationWarning)
-os.environ['OPENCV_VIDEOIO_MSMF_ENABLE_HW_TRANSFORMS'] = '0'
 
 class FaceTrainer:
     def __init__(self):
@@ -23,7 +30,11 @@ class FaceTrainer:
         self.mobilenet_model = MobileNetV2(weights='imagenet', include_top=False, input_shape=(224, 224, 3), pooling='avg')
         self.font = cv2.FONT_HERSHEY_SIMPLEX
         self.db_path = "face_recognition.db"
+        self.results_dir = "results"
+        if not os.path.exists(self.results_dir):
+            os.makedirs(self.results_dir)
         self.initialize_database()
+        self.migrate_database()
 
     def initialize_database(self):
         conn = None
@@ -37,17 +48,47 @@ class FaceTrainer:
             
             cursor.execute('''CREATE TABLE IF NOT EXISTS training_sessions
                               (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                               user_id INTEGER,
                                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                               num_users INTEGER,
                                num_images INTEGER,
                                model_accuracy REAL,
-                               training_stats TEXT,
-                               FOREIGN KEY (user_id) REFERENCES users(id))''')
+                               training_stats TEXT)''')
+            
+            cursor.execute('''CREATE TABLE IF NOT EXISTS recognition_sessions
+                              (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                               timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                               total_frames INTEGER,
+                               faces_detected INTEGER,
+                               faces_recognized INTEGER,
+                               recognition_rate REAL,
+                               avg_confidence REAL,
+                               fps REAL)''')
             
             conn.commit()
             print("Database initialized successfully")
         except sqlite3.Error as e:
             print(f"Database error: {e}")
+        finally:
+            if conn:
+                conn.close()
+
+    def migrate_database(self):
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            # Check if the username column exists
+            cursor.execute("PRAGMA table_info(training_sessions)")
+            columns = [column[1] for column in cursor.fetchall()]
+            
+            if 'username' not in columns:
+                # Add the username column
+                cursor.execute("ALTER TABLE training_sessions ADD COLUMN username TEXT")
+                conn.commit()
+                print("Database schema updated: added 'username' column to training_sessions table")
+            
+        except sqlite3.Error as e:
+            print(f"Database migration error: {e}")
         finally:
             if conn:
                 conn.close()
@@ -89,51 +130,74 @@ class FaceTrainer:
         
         return combined_features
 
-    def generate_dataset(self):
-        if not os.path.exists('data'):
-            os.makedirs('data')
-
-        username = input("Enter the person's name: ")
-        
-        # Add user to the database if not exists
-        user_id = self.add_user_to_db(username)
-        
-        cap = cv2.VideoCapture(0)
-        img_id = 0
-        total_imgs = 20
-
+    def capture_image_with_retry(self, cap, frame_count, total_imgs):
         while True:
             ret, frame = cap.read()
             if not ret:
                 print("Failed to capture frame from camera.")
-                break
+                retry = input("Do you want to retry? (y/n): ").lower()
+                if retry == 'y':
+                    continue
+                else:
+                    return None, frame_count
 
             result = self.preprocess_image(frame)
             if result is not None:
                 face, (x, y, w, h) = result
                 cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
                 
-                img_id += 1
-                img_name = f"data/{username}.{user_id}.{img_id}.jpg"
+                frame_count += 1
+                img_name = f"image_data/{self.current_username}.{self.current_user_id}.{frame_count}.jpg"
                 cv2.imwrite(img_name, face)
-                cv2.putText(frame, f"Captured {img_id}/{total_imgs}", (50, 50), self.font, 0.9, (0, 255, 0), 2)
-                print(f"Captured image {img_id}/{total_imgs}: {img_name}")
+                cv2.putText(frame, f"Captured {frame_count}/{total_imgs}", (50, 50), self.font, 0.9, (0, 255, 0), 2)
+                print(f"Captured image {frame_count}/{total_imgs}: {img_name}")
                 
-                time.sleep(0.25)
+                cv2.imshow('Capturing Face Data', frame)
+                cv2.waitKey(250)  # Display for 250ms
+                return frame, frame_count
             else:
                 cv2.putText(frame, "No face detected", (50, 50), self.font, 0.9, (0, 0, 255), 2)
+                cv2.imshow('Capturing Face Data', frame)
+                
+                if cv2.waitKey(1) & 0xFF == ord('r'):
+                    print("Retrying capture...")
+                    continue
+                elif cv2.waitKey(1) & 0xFF == ord('s'):
+                    print("Skipping this capture...")
+                    return None, frame_count
 
-            cv2.imshow('Capturing Face Data', frame)
+    def generate_dataset(self):
+        if not os.path.exists('image_data'):
+            os.makedirs('image_data')
 
-            if cv2.waitKey(1) & 0xFF == ord('q') or img_id == total_imgs:
+        self.current_username = input("Enter the person's name: ")
+        
+        # Add user to the database if not exists
+        self.current_user_id = self.add_user_to_db(self.current_username)
+        
+        cap = cv2.VideoCapture(0)
+        frame_count = 0
+        total_imgs = 20
+
+        while frame_count < total_imgs:
+            frame, new_frame_count = self.capture_image_with_retry(cap, frame_count, total_imgs)
+            if frame is None:
+                print(f"Capture failed. Current progress: {frame_count}/{total_imgs}")
+                retry = input("Do you want to continue capturing? (y/n): ").lower()
+                if retry != 'y':
+                    break
+            else:
+                frame_count = new_frame_count
+
+            if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
 
         cap.release()
         cv2.destroyAllWindows()
-        print(f"Dataset generation completed for {username}. {img_id} images captured.")
+        print(f"Dataset generation completed for {self.current_username}. {frame_count} images captured.")
 
         # Update training session in the database
-        self.update_training_session(user_id, img_id)
+        self.update_training_session(self.current_user_id, frame_count)
 
     def add_user_to_db(self, username):
         conn = None
@@ -169,7 +233,7 @@ class FaceTrainer:
                 conn.close()
 
     def train_classifier(self):
-        data_dir = "data"
+        data_dir = "image_data"
         path = [os.path.join(data_dir, f) for f in os.listdir(data_dir)]
 
         faces = []
@@ -206,26 +270,48 @@ class FaceTrainer:
 
         X_train, X_test, y_train, y_test = train_test_split(faces, ids, test_size=0.2, random_state=42)
 
+        # Performance metrics
+        training_start_time = time.time()
+        
         # Train SVM classifier
-        self.svm_classifier = SVC(probability=True)
+        self.svm_classifier = SVC(kernel='rbf', probability=True)
         self.svm_classifier.fit(X_train, y_train)
+        
+        training_end_time = time.time()
+        training_duration = training_end_time - training_start_time
 
-        # Evaluate the model
+        # Calculate additional metrics
         y_pred = self.svm_classifier.predict(X_test)
         accuracy = accuracy_score(y_test, y_pred)
         precision = precision_score(y_test, y_pred, average='weighted')
         recall = recall_score(y_test, y_pred, average='weighted')
         f1 = f1_score(y_test, y_pred, average='weighted')
+        
+        # Confusion matrix
+        cm = confusion_matrix(y_test, y_pred)
+        
+        # Cross-validation score
+        cv_scores = cross_val_score(self.svm_classifier, X_train, y_train, cv=5)
 
         training_stats = {
-            "unique_ids": len(set(ids)),
+            "unique_ids": len(unique_ids),
             "total_images": len(faces),
-            "images_per_person": len(faces) / len(set(ids)),
-            "accuracy": accuracy,
-            "precision": precision,
-            "recall": recall,
-            "f1_score": f1
+            "images_per_person": len(faces) / len(unique_ids),
+            "min_images_per_id": int(min(np.bincount(ids))),  # Convert to int
+            "max_images_per_id": int(max(np.bincount(ids))),  # Convert to int
+            "training_date": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            "training_duration": float(training_duration),  # Convert to float
+            "accuracy": float(accuracy),  # Convert to float
+            "precision": float(precision),  # Convert to float
+            "recall": float(recall),  # Convert to float
+            "f1_score": float(f1),  # Convert to float
+            "cv_mean_score": float(np.mean(cv_scores)),  # Convert to float
+            "cv_std": float(np.std(cv_scores)),  # Convert to float
+            "confusion_matrix": cm.tolist()  # Convert to list
         }
+
+        # Convert all NumPy types to Python types
+        training_stats = {k: self.numpy_to_python(v) for k, v in training_stats.items()}
 
         # Save to database
         try:
@@ -235,7 +321,7 @@ class FaceTrainer:
                 INSERT INTO training_sessions 
                 (username, num_images, model_accuracy, training_stats) 
                 VALUES (?, ?, ?, ?)
-            """, ("latest_training", len(faces), accuracy, json.dumps(training_stats)))
+            """, ("latest_training", len(faces), float(accuracy), json.dumps(training_stats)))
             conn.commit()
         except sqlite3.Error as e:
             print(f"Database error: {e}")
@@ -245,6 +331,75 @@ class FaceTrainer:
 
         print(f"Training completed. Accuracy: {accuracy:.2f}")
         print(f"Training stats: {training_stats}")
+
+        # Save training stats in visual format
+        self.save_training_stats_visual(training_stats, y_test, y_pred, cv_scores)
+
+    def save_training_stats_visual(self, training_stats, y_test, y_pred, cv_scores):
+        # Create bar plot for accuracy metrics
+        metrics = ['accuracy', 'precision', 'recall', 'f1_score']
+        values = [training_stats[metric] for metric in metrics]
+
+        plt.figure(figsize=(10, 6))
+        plt.bar(metrics, values)
+        plt.title('Model Performance Metrics')
+        plt.ylabel('Score')
+        plt.ylim(0, 1)
+        for i, v in enumerate(values):
+            plt.text(i, v, f'{v:.2f}', ha='center', va='bottom')
+        plt.savefig(os.path.join(self.results_dir, 'model_performance.png'))
+        plt.close()
+
+        # Create pie chart for dataset composition
+        labels = ['Images per Person', 'Unique IDs']
+        sizes = [training_stats['images_per_person'], training_stats['unique_ids']]
+
+        plt.figure(figsize=(8, 8))
+        plt.pie(sizes, labels=labels, autopct='%1.1f%%', startangle=90)
+        plt.axis('equal')
+        plt.title('Dataset Composition')
+        plt.savefig(os.path.join(self.results_dir, 'dataset_composition.png'))
+        plt.close()
+
+        # Confusion Matrix Heatmap
+        plt.figure(figsize=(10, 8))
+        sns.heatmap(np.array(training_stats['confusion_matrix']), annot=True, fmt='d', cmap='Blues')
+        plt.title('Confusion Matrix')
+        plt.ylabel('True Label')
+        plt.xlabel('Predicted Label')
+        plt.savefig(os.path.join(self.results_dir, 'confusion_matrix.png'))
+        plt.close()
+
+        # ROC Curve (for binary classification)
+        if len(np.unique(y_test)) == 2:
+            fpr, tpr, _ = roc_curve(y_test, self.svm_classifier.predict_proba(X_test)[:, 1])
+            roc_auc = auc(fpr, tpr)
+            plt.figure()
+            plt.plot(fpr, tpr, color='darkorange', lw=2, label=f'ROC curve (AUC = {roc_auc:.2f})')
+            plt.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--')
+            plt.xlim([0.0, 1.0])
+            plt.ylim([0.0, 1.05])
+            plt.xlabel('False Positive Rate')
+            plt.ylabel('True Positive Rate')
+            plt.title('Receiver Operating Characteristic (ROC) Curve')
+            plt.legend(loc="lower right")
+            plt.savefig(os.path.join(self.results_dir, 'roc_curve.png'))
+            plt.close()
+
+        # Cross-validation scores distribution
+        plt.figure()
+        sns.histplot(cv_scores, kde=True)
+        plt.title('Distribution of Cross-Validation Scores')
+        plt.xlabel('Accuracy')
+        plt.ylabel('Frequency')
+        plt.savefig(os.path.join(self.results_dir, 'cv_scores_distribution.png'))
+        plt.close()
+
+        # Save JSON file
+        with open(os.path.join(self.results_dir, 'training_stats.json'), 'w') as f:
+            json.dump(training_stats, f, indent=4)
+
+        print(f"Training stats visualizations and JSON saved in {self.results_dir}")
 
     def recognize_face(self):
         cap = cv2.VideoCapture(0)
@@ -317,6 +472,17 @@ class FaceTrainer:
             if conn:
                 conn.close()
 
+    def numpy_to_python(self, obj):
+        # this is mainly to resolve errors from the numpy types saving into json
+        if isinstance(obj, np.integer):
+            return int(obj)
+        elif isinstance(obj, np.floating):
+            return float(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        else:
+            return obj
+
 def main():
     trainer = FaceTrainer()
     while True:
@@ -345,5 +511,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-

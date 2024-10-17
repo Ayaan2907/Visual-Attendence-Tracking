@@ -1,4 +1,3 @@
-
 import os
 os.environ['OPENCV_VIDEOIO_MSMF_ENABLE_HW_TRANSFORMS'] = '0'
 
@@ -19,6 +18,7 @@ from sklearn.metrics import confusion_matrix, roc_curve, auc
 from datetime import datetime
 import time
 from sklearn.model_selection import cross_val_score
+import pickle
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
@@ -232,7 +232,29 @@ class FaceTrainer:
             if conn:
                 conn.close()
 
-    def train_classifier(self):
+    def save_model(self, filename='face_recognition_model.pkl'):
+        """Save the trained model to a file."""
+        if hasattr(self, 'svm_classifier'):
+            with open(filename, 'wb') as file:
+                pickle.dump(self.svm_classifier, file)
+            print(f"Model saved to {filename}")
+        else:
+            print("No trained model to save. Please train the classifier first.")
+
+    def load_model(self, filename='face_recognition_model.pkl'):
+        """Load a trained model from a file."""
+        try:
+            with open(filename, 'rb') as file:
+                self.svm_classifier = pickle.load(file)
+            print(f"Model loaded from {filename}")
+            return True
+        except FileNotFoundError:
+            print(f"Model file {filename} not found.")
+        except Exception as e:
+            print(f"Error loading model: {e}")
+        return False
+
+    def train_classifier(self, retrain=False):
         data_dir = "image_data"
         path = [os.path.join(data_dir, f) for f in os.listdir(data_dir)]
 
@@ -269,6 +291,18 @@ class FaceTrainer:
             return
 
         X_train, X_test, y_train, y_test = train_test_split(faces, ids, test_size=0.2, random_state=42)
+
+        if retrain and hasattr(self, 'svm_classifier'):
+            print("Retraining existing model with new data...")
+            # Assuming X_train and y_train are your new training data
+            self.svm_classifier.fit(X_train, y_train)
+        else:
+            print("Training new model...")
+            self.svm_classifier = SVC(kernel='rbf', probability=True)
+            self.svm_classifier.fit(X_train, y_train)
+
+        # After training is complete, save the model
+        self.save_model()
 
         # Performance metrics
         training_start_time = time.time()
@@ -485,10 +519,25 @@ class FaceTrainer:
 
 def main():
     trainer = FaceTrainer()
+    model_filename = 'face_recognition_model.pkl'
+
+    # Check if a trained model is available
+    if os.path.exists(model_filename):
+        load_choice = input(f"A trained model ({model_filename}) is available. Do you want to load it? (y/n): ").lower()
+        if load_choice == 'y':
+            if trainer.load_model(model_filename):
+                print("Model loaded successfully.")
+            else:
+                print("Failed to load the model. Proceeding with the main menu.")
+        else:
+            print("Proceeding without loading the model.")
+    else:
+        print("No trained model found. You'll need to train a new model.")
+
     while True:
         print("\nFace Recognition Menu:")
         print("1. Generate Dataset")
-        print("2. Train Classifier")
+        print("2. Train/Retrain Classifier")
         print("3. Recognize Face")
         print("4. Exit")
         
@@ -500,9 +549,16 @@ def main():
                 trainer.generate_dataset()
             print("Dataset generation completed. Please train the classifier now.")
         elif choice == '2':
-            trainer.train_classifier()
+            if hasattr(trainer, 'svm_classifier'):
+                retrain = input("Existing model found. Do you want to retrain it with new data? (y/n): ").lower() == 'y'
+                trainer.train_classifier(retrain=retrain)
+            else:
+                trainer.train_classifier()
         elif choice == '3':
-            trainer.recognize_face()
+            if hasattr(trainer, 'svm_classifier'):
+                trainer.recognize_face()
+            else:
+                print("No trained model available. Please train the classifier first.")
         elif choice == '4':
             print("Exiting the program.")
             break

@@ -367,9 +367,9 @@ class FaceTrainer:
         print(f"Training stats: {training_stats}")
 
         # Save training stats in visual format
-        self.save_training_stats_visual(training_stats, y_test, y_pred, cv_scores)
+        self.save_training_stats_visual(training_stats, y_test, y_pred, cv_scores, X_test)  # Pass X_test
 
-    def save_training_stats_visual(self, training_stats, y_test, y_pred, cv_scores):
+    def save_training_stats_visual(self, training_stats, y_test, y_pred, cv_scores, X_test):
         # Create bar plot for accuracy metrics
         metrics = ['accuracy', 'precision', 'recall', 'f1_score']
         values = [training_stats[metric] for metric in metrics]
@@ -406,7 +406,12 @@ class FaceTrainer:
 
         # ROC Curve (for binary classification)
         if len(np.unique(y_test)) == 2:
-            fpr, tpr, _ = roc_curve(y_test, self.svm_classifier.predict_proba(X_test)[:, 1])
+            # Assuming 1 is the positive class and 3 is the negative class
+            y_test_binary = np.where(y_test == 1, 1, 0)
+            y_pred_binary = np.where(y_pred == 1, 1, 0)
+
+            # Then use y_test_binary and y_pred_binary for roc_curve
+            fpr, tpr, _ = roc_curve(y_test_binary, self.svm_classifier.predict_proba(X_test)[:, 1])
             roc_auc = auc(fpr, tpr)
             plt.figure()
             plt.plot(fpr, tpr, color='darkorange', lw=2, label=f'ROC curve (AUC = {roc_auc:.2f})')

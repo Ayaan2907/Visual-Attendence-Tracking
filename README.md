@@ -2,13 +2,6 @@
 
 This project implements a face recognition system for attendance tracking using Python, OpenCV, TensorFlow, and scikit-learn.
 
-## Important Files
-
-- `sample.py`: Main Python script containing the FaceTrainer class and program logic
-- `requirements.txt`: List of required Python packages
-- `face_recognition.db`: SQLite database for storing user and training session information
-- `data/`: Directory containing captured face images for training
-
 ## Setup and Installation
 
 1. Clone the repository:
@@ -33,11 +26,18 @@ This project implements a face recognition system for attendance tracking using 
 
 Run the main script: 
 
+First, run the following command to generate a key and input a password:
 
-Follow the on-screen menu to:
-1. Generate datasets for multiple individuals
-2. Train the classifier
-3. Perform face recognition
+```bash
+python3 generate_key.py
+```
+
+Then, start the Streamlit application:
+
+```bash
+streamlit run main.py
+```
+
 
 ## System Overview
 

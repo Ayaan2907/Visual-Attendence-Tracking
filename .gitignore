@@ -89,3 +89,6 @@ nosetests.xml
 coverage.xml
 *.cover
 .hypothesis/
+
+# Encryption key
+encryption_key.key

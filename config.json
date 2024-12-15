@@ -1,0 +1,25 @@
+{
+    "min_face_size": [
+        33,
+        33
+    ],
+    "detection_confidence": 0.5,
+    "feature_extraction": {
+        "image_size": [
+            224,
+            224
+        ],
+        "batch_size": 32
+    },
+    "training": {
+        "test_size": 0.2,
+        "random_state": 42
+    },
+    "camera": {
+        "capture_interval": 0.23,
+        "frame_size": [
+            640,
+            480
+        ]
+    }
+}

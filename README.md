@@ -29,15 +29,38 @@ Run the main script:
 First, run the following command to generate a key and input a password:
 
 ```bash
-python3 generate_key.py
+python3 utils/generate_key.py
 ```
 
 Then, start the Streamlit application:
 
 ```bash
-streamlit run main.py
+streamlit run streamlit_app.py
 ```
 
+## Directory Structure
+
+The project is organized into the following directories:
+
+```
+.
+├── config
+│   └── config.json
+├── models
+│   ├── face_recognition_model.pkl
+│   ├── classifier.xml
+│   └── haarcascade_frontalface_default.xml
+├── utils
+│   └── generate_key.py
+├── config_manager.py
+├── encryption_manager.py
+├── database_manager.py
+├── liveness_detector.py
+├── face_recognition_system.py
+├── streamlit_app.py
+├── requirements.txt
+└── README.md
+```
 
 ## System Overview
 
@@ -86,7 +109,6 @@ To view detailed statistics for your trained model, check the output after the t
 - Explore deep learning-based face recognition models (e.g., FaceNet or DeepFace)
 - Add real-time attendance logging and reporting features
 - Implement data augmentation techniques to improve model robustness
-
 
 ## License
 
@@ -142,7 +164,6 @@ To view detailed statistics for your trained model, check the output after the t
 <!-- more to go here -->
 
 ### Future Enhancements
-
 
 ### System Requirements
 - **Python**: 3.7+
